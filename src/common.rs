@@ -18,7 +18,10 @@ impl TryFrom<&u8> for CommandCode {
             0x01 => Ok(CommandCode::Connect),
             0x02 => Ok(CommandCode::Bind),
             0x03 => Ok(CommandCode::Associate),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "command code not recognized")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "command code not recognized",
+            )),
         }
     }
 }
@@ -48,7 +51,10 @@ impl TryFrom<&u8> for AddressType {
             0x01 => Ok(AddressType::IpV4),
             0x04 => Ok(AddressType::IpV6),
             0x03 => Ok(AddressType::DomainName),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "address type not recognized")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "address type not recognized",
+            )),
         }
     }
 }
@@ -78,7 +84,7 @@ impl Address {
         }
     }
 
-    pub fn encode<B>(&self, buf: &mut B) 
+    pub fn encode<B>(&self, buf: &mut B)
     where
         B: BufMut,
     {

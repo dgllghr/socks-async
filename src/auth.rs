@@ -1,6 +1,6 @@
 use bytes::BytesMut;
-use tokio::net::TcpStream;
 use tokio::io;
+use tokio::net::TcpStream;
 use tokio::prelude::*;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -37,10 +37,15 @@ pub struct AuthResult {
 }
 
 pub trait AuthProtocol {
-    type Future: Future<Item=AuthResult, Error=std::io::Error> + Send;
+    type Future: Future<Item = AuthResult, Error = std::io::Error> + Send;
 
     fn methods(&self) -> Vec<AuthMethod>;
-    fn authenticate(&self, client: TcpStream, auth_method: &AuthMethod, buf: BytesMut) -> Self::Future;
+    fn authenticate(
+        &self,
+        client: TcpStream,
+        auth_method: &AuthMethod,
+        buf: BytesMut,
+    ) -> Self::Future;
 }
 
 #[derive(Clone)]
@@ -52,9 +57,18 @@ impl AuthProtocol for NoAuth {
     fn methods(&self) -> Vec<AuthMethod> {
         vec![AuthMethod::NoAuth]
     }
-    
-    fn authenticate(&self, client: TcpStream, _auth_method: &AuthMethod, buf: BytesMut) -> Self::Future {
-        future::ok(AuthResult{ authenticated: true, client, buf })
+
+    fn authenticate(
+        &self,
+        client: TcpStream,
+        _auth_method: &AuthMethod,
+        buf: BytesMut,
+    ) -> Self::Future {
+        future::ok(AuthResult {
+            authenticated: true,
+            client,
+            buf,
+        })
     }
 }
 
@@ -65,13 +79,18 @@ pub struct UserPassAuth {
 }
 
 impl AuthProtocol for UserPassAuth {
-    type Future = Box<Future<Item=AuthResult, Error=std::io::Error> + Send>;
+    type Future = Box<Future<Item = AuthResult, Error = std::io::Error> + Send>;
 
     fn methods(&self) -> Vec<AuthMethod> {
         vec![AuthMethod::UserPass]
     }
-    
-    fn authenticate(&self, _client: TcpStream, _auth_method: &AuthMethod, _buf: BytesMut) -> Self::Future {
+
+    fn authenticate(
+        &self,
+        _client: TcpStream,
+        _auth_method: &AuthMethod,
+        _buf: BytesMut,
+    ) -> Self::Future {
         unimplemented!()
     }
 }

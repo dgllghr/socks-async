@@ -32,8 +32,8 @@ struct Request {
 
 pub trait Connector {
     type R: ReplyMessage;
-    type ConnectFuture: Future<Item=Self::R, Error=io::Error> + Send;
-    
+    type ConnectFuture: Future<Item = Self::R, Error = io::Error> + Send;
+
     fn connect(&self, address: &Address) -> Self::ConnectFuture;
 }
 
@@ -44,8 +44,8 @@ pub trait Connector {
 pub struct DefaultConnector;
 
 pub trait ReplyMessage {
-    type Future: Future<Item=(TcpStream, BytesMut), Error=io::Error> + Send;
-    
+    type Future: Future<Item = (TcpStream, BytesMut), Error = io::Error> + Send;
+
     fn send(&self, address: &Address, client: TcpStream, buf: BytesMut) -> Self::Future;
     fn connection(self) -> Option<TcpStream>;
 }
@@ -72,7 +72,7 @@ impl<A, R, C> Server<A, C>
 where
     A: 'static + AuthProtocol + Clone + Send,
     R: 'static + ReplyMessage + Send,
-    C: 'static + Connector<R=R> + Clone + Send,
+    C: 'static + Connector<R = R> + Clone + Send,
 {
     pub fn new(auth: A, connector: C, handshake_timeout: Duration) -> Server<A, C> {
         Server {
@@ -88,12 +88,14 @@ where
         while let Some(stream) = await!(incoming.next()) {
             let server = self.clone();
             let client = stream?;
-            tokio::spawn_async(async move {
-                match await!(server.client_handler(client)) {
-                    Ok(_) => (),
-                    Err(err) => println!("error in socks connection. {:?}", err),
-                }
-            });
+            tokio::spawn_async(
+                async move {
+                    match await!(server.client_handler(client)) {
+                        Ok(_) => (),
+                        Err(err) => println!("error in socks connection. {:?}", err),
+                    }
+                },
+            );
         }
         Ok(())
     }
@@ -113,23 +115,33 @@ where
             await!(reject_greeting(greeting.client))?;
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
-                "no acceptable auth methods"
+                "no acceptable auth methods",
             ));
         }
-        let client = await!(accept_greeting(greeting.client, auth_method.as_ref().unwrap()))?;
+        let client = await!(accept_greeting(
+            greeting.client,
+            auth_method.as_ref().unwrap()
+        ))?;
 
-        let auth_result = await!(self.auth.authenticate(client, auth_method.unwrap(), greeting.buf))?;
+        let auth_result = await!(self.auth.authenticate(
+            client,
+            auth_method.unwrap(),
+            greeting.buf
+        ))?;
         if !auth_result.authenticated {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "authentication failed. access denied."
+                "authentication failed. access denied.",
             ));
         }
 
         let request = await!(recv_conn_request(auth_result.client, auth_result.buf))?;
         if request.cmd_code != CommandCode::Connect {
             await!(Reply::CommandNotSupported.send(&request.address, request.client, request.buf))?;
-            return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "command not supported."));
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "command not supported.",
+            ));
         }
         let reply = await!(self.connector.connect(&request.address))?;
         let (client, _) = await!(reply.send(&request.address, request.client, request.buf))?;
@@ -158,9 +170,9 @@ impl Default for DefaultConnector {
 
 impl Connector for DefaultConnector {
     type R = Reply;
-    type ConnectFuture = Box<Future<Item=Self::R, Error=io::Error> + Send>;
+    type ConnectFuture = Box<Future<Item = Self::R, Error = io::Error> + Send>;
 
-    fn connect(&self, address: &Address) -> Box<Future<Item=Self::R, Error=io::Error> + Send> {
+    fn connect(&self, address: &Address) -> Box<Future<Item = Self::R, Error = io::Error> + Send> {
         match address {
             Address::Ip(addr) => {
                 let f = TcpStream::connect(addr)
@@ -176,10 +188,8 @@ impl Connector for DefaultConnector {
                     });
                 Box::new(f)
             }
-            Address::Domain(_, _) => {
-                Box::new(future::ok(Reply::AddressTypeNotSupported))
-            }
-        } 
+            Address::Domain(_, _) => Box::new(future::ok(Reply::AddressTypeNotSupported)),
+        }
     }
 }
 
@@ -236,16 +246,26 @@ async fn recv_greeting(client: TcpStream, mut buf: BytesMut) -> std::io::Result<
     buf.resize(2, 0);
     let (client, mut buf) = await!(io::read_exact(client, buf))?;
     if buf[0] != 0x05 {
-        return Err(io::Error::new(io::ErrorKind::Other, "invalid version. only socks5 supported."));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "invalid version. only socks5 supported.",
+        ));
     }
     let num_auth_methods = buf[1];
     buf.resize(num_auth_methods as usize, 0);
     let (client, buf) = await!(io::read_exact(client, buf))?;
     let auth_methods = buf.iter().map(|b| b.into()).collect();
-    Ok(Greeting { client, buf, auth_methods })
+    Ok(Greeting {
+        client,
+        buf,
+        auth_methods,
+    })
 }
 
-async fn accept_greeting(client: TcpStream, auth_method: &AuthMethod) -> std::io::Result<TcpStream> {
+async fn accept_greeting(
+    client: TcpStream,
+    auth_method: &AuthMethod,
+) -> std::io::Result<TcpStream> {
     let (client, _) = await!(io::write_all(client, [0x05, auth_method.into()]))?;
     Ok(client)
 }
@@ -261,7 +281,7 @@ fn select_auth_method<'a, 'b>(
 ) -> Option<&'a AuthMethod> {
     for am in server_auth_methods {
         if client_auth_methods.contains(&am) {
-            return Some(am)
+            return Some(am);
         }
     }
     None
@@ -271,15 +291,26 @@ async fn recv_conn_request(client: TcpStream, mut buf: BytesMut) -> std::io::Res
     buf.resize(4, 0);
     let (client, buf) = await!(io::read_exact(client, buf))?;
     if buf[0] != 0x05 {
-        return Err(io::Error::new(io::ErrorKind::Other, "invalid version. only socks5 supported."));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "invalid version. only socks5 supported.",
+        ));
     }
     let cmd_code = CommandCode::try_from(&buf[1])?;
     if buf[2] != 0 {
-        return Err(io::Error::new(io::ErrorKind::Other, "invalid reserved byte."));
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "invalid reserved byte.",
+        ));
     }
     let addr_type = AddressType::try_from(&buf[3])?;
     let (client, buf, address) = await!(parse_address(client, buf, addr_type))?;
-    Ok(Request { client, buf, cmd_code, address })
+    Ok(Request {
+        client,
+        buf,
+        cmd_code,
+        address,
+    })
 }
 
 async fn parse_address(
@@ -348,11 +379,14 @@ fn parse_domain_addr(
 async fn copy(left: TcpStream, right: TcpStream) -> io::Result<()> {
     let (left_reader, left_writer) = left.split();
     let (right_reader, right_writer) = right.split();
-    let result = await!(io::copy(left_reader, right_writer)
-        .select2(io::copy(right_reader, left_writer)));
+    let result =
+        await!(io::copy(left_reader, right_writer).select2(io::copy(right_reader, left_writer)));
     match result {
         Ok(_) => Ok(()),
         // TODO investigate this error system
-        Err(_) => Err(io::Error::new(io::ErrorKind::Other, "error transferring data"))
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::Other,
+            "error transferring data",
+        )),
     }
 }
