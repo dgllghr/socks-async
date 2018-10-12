@@ -457,7 +457,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "socks-rs"
+name = "socks_async"
 version = "0.1.0"
 dependencies = [
  "bytes 0.4.10 (registry+https://github.com/rust-lang/crates.io-index)",

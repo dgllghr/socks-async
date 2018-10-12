@@ -1,5 +1,5 @@
 [package]
-name = "socks-rs"
+name = "socks_async"
 version = "0.1.0"
 authors = ["dan"]
 edition = "2018"

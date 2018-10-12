@@ -1,5 +1,5 @@
-use super::auth::*;
-use super::common::*;
+pub use super::auth::*;
+pub use super::common::*;
 use bytes::{BufMut, BytesMut};
 use std;
 use std::collections::HashSet;
