@@ -1,0 +1,10 @@
+[package]
+name = "socks-rs"
+version = "0.1.0"
+authors = ["dan"]
+edition = "2018"
+
+[dependencies]
+bytes = "0.4"
+tokio = { version = "0.1", features = ["async-await-preview"] }
+trust-dns-resolver = "0.10.0-alpha.2"
