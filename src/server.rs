@@ -128,7 +128,8 @@ where
             auth_method.unwrap(),
             greeting.buf
         ))?;
-        if !auth_result.authenticated {
+        if !auth_result.authorized {
+            println!("access denied");
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "authentication failed. access denied.",

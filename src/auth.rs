@@ -30,8 +30,14 @@ impl Into<u8> for &AuthMethod {
     }
 }
 
+impl Into<u8> for AuthMethod {
+    fn into(self) -> u8 {
+        (&self).into()
+    }
+}
+
 pub struct AuthResult {
-    pub authenticated: bool,
+    pub authorized: bool,
     pub client: TcpStream,
     pub buf: BytesMut,
 }
@@ -65,7 +71,7 @@ impl AuthProtocol for NoAuth {
         buf: BytesMut,
     ) -> Self::Future {
         future::ok(AuthResult {
-            authenticated: true,
+            authorized: true,
             client,
             buf,
         })
@@ -78,6 +84,12 @@ pub struct UserPassAuth {
     pub password: String,
 }
 
+impl UserPassAuth {
+    pub fn new(username: &str, password: &str) -> UserPassAuth {
+        UserPassAuth { username: username.to_string(), password: password.to_string() }
+    }
+}
+
 impl AuthProtocol for UserPassAuth {
     type Future = Box<Future<Item = AuthResult, Error = std::io::Error> + Send>;
 
@@ -87,10 +99,51 @@ impl AuthProtocol for UserPassAuth {
 
     fn authenticate(
         &self,
-        _client: TcpStream,
+        client: TcpStream,
         _auth_method: &AuthMethod,
-        _buf: BytesMut,
+        buf: BytesMut,
     ) -> Self::Future {
-        unimplemented!()
+        let server_username = self.username.clone();
+        let server_password = self.password.clone();
+        let f = recv_username_password(client, buf)
+            .and_then(move |(client, buf, username, password)| {
+                let unauthorized = username != server_username || password != server_password;
+                let response_code = if unauthorized { 0xff } else { 0x00 };
+                io::write_all(client, [0x01, response_code])
+                    .map(move |(client, _)| AuthResult{ client, buf, authorized: !unauthorized })
+            });
+        Box::new(f)
     }
+}
+
+fn recv_username_password(
+    conn: TcpStream,
+    mut buf: BytesMut,
+) -> Box<Future<Item=(TcpStream, BytesMut, String, String), Error=io::Error> + Send> {
+    buf.resize(2, 0);
+    let f = io::read_exact(conn, buf)
+        .and_then(|(conn, mut buf)| -> Box<Future<Item=(TcpStream, BytesMut), Error=io::Error> + Send> {
+            if buf[0] != 0x01 {
+                Box::new(Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "invalid version. only socks5 supported.",
+                )).into_future())
+            } else {
+                let username_len = buf[1] as usize;
+                buf.resize(username_len + 1, 0);
+                Box::new(io::read_exact(conn, buf))
+            }
+        })
+        .and_then(|(conn, mut buf)| {
+            let username_len = buf.len() - 1;
+            let username = String::from_utf8_lossy(&buf[..username_len]).into_owned();
+            let password_len = buf[username_len] as usize;
+            buf.resize(password_len, 0);
+            io::read_exact(conn, buf)
+                .map(move |(conn, buf)| {
+                    let password = String::from_utf8_lossy(&buf[..]).into_owned();
+                    (conn, buf, username, password)
+                })
+        });
+    Box::new(f)
 }

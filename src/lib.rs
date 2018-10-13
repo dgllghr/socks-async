@@ -1,4 +1,4 @@
-#![feature(await_macro, async_await, futures_api, try_from)]
+#![feature(await_macro, async_await, futures_api, try_from, pin)]
 
 #[macro_use]
 extern crate tokio;
