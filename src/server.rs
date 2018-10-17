@@ -50,19 +50,6 @@ pub trait ReplyMessage {
     fn connection(self) -> Option<TcpStream>;
 }
 
-pub enum Reply {
-    Success(TcpStream),
-    ServerFailure,
-    ConnNotAllowed,
-    NetworkUnreachable,
-    HostUnreachable,
-    ConnectionRefused,
-    TtlExpired,
-    CommandNotSupported,
-    AddressTypeNotSupported,
-    Other(u8, Option<TcpStream>),
-}
-
 pub struct RawReply {
     connection: Option<TcpStream>,
     message: BytesMut,
@@ -70,7 +57,7 @@ pub struct RawReply {
 
 impl<A, R, C> Server<A, C>
 where
-    A: 'static + AuthProtocol + Clone + Send,
+    A: 'static + AuthServerProtocol + Clone + Send,
     R: 'static + ReplyMessage + Send,
     C: 'static + Connector<R = R> + Clone + Send,
 {
@@ -123,20 +110,18 @@ where
             auth_method.as_ref().unwrap()
         ))?;
 
-        let auth_result = await!(self.auth.authenticate(
-            client,
-            auth_method.unwrap(),
-            greeting.buf
-        ))?;
+        let auth_result = await!(
+            self.auth
+                .check_auth(client, auth_method.unwrap(), greeting.buf)
+        )?;
         if !auth_result.authorized {
-            println!("access denied");
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "authentication failed. access denied.",
             ));
         }
 
-        let request = await!(recv_conn_request(auth_result.client, auth_result.buf))?;
+        let request = await!(recv_conn_request(auth_result.conn, auth_result.buf))?;
         if request.cmd_code != CommandCode::Connect {
             await!(Reply::CommandNotSupported.send(&request.address, request.client, request.buf))?;
             return Err(io::Error::new(
@@ -174,10 +159,12 @@ impl Connector for DefaultConnector {
     type ConnectFuture = Box<Future<Item = Self::R, Error = io::Error> + Send>;
 
     fn connect(&self, address: &Address) -> Box<Future<Item = Self::R, Error = io::Error> + Send> {
+        let address = address.clone();
         match address {
             Address::Ip(addr) => {
-                let f = TcpStream::connect(addr)
-                    .map(|c| Reply::Success(c))
+                let f = TcpStream::connect(&addr)
+                    // TODO use actual instead of provided address?
+                    .map(|c| Reply::Success(c, address))
                     .or_else(|err| {
                         let reply = match err.kind() {
                             io::ErrorKind::ConnectionRefused => Reply::ConnectionRefused,
@@ -194,29 +181,12 @@ impl Connector for DefaultConnector {
     }
 }
 
-impl Reply {
-    fn code(&self) -> u8 {
-        match self {
-            Reply::Success(_) => 0x00,
-            Reply::ServerFailure => 0x01,
-            Reply::ConnNotAllowed => 0x02,
-            Reply::NetworkUnreachable => 0x03,
-            Reply::HostUnreachable => 0x04,
-            Reply::ConnectionRefused => 0x05,
-            Reply::TtlExpired => 0x06,
-            Reply::CommandNotSupported => 0x07,
-            Reply::AddressTypeNotSupported => 0x08,
-            Reply::Other(code, _) => code.clone(),
-        }
-    }
-}
-
 impl ReplyMessage for Reply {
     type Future = io::WriteAll<TcpStream, BytesMut>;
 
     fn connection(self) -> Option<TcpStream> {
         match self {
-            Reply::Success(conn) => Some(conn),
+            Reply::Success(conn, _) => Some(conn),
             Reply::Other(_, conn) => conn,
             _ => None,
         }

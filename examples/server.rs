@@ -13,7 +13,7 @@ use trust_dns_resolver::AsyncResolver;
 
 fn main() {
     let addr = "0.0.0.0:8080".parse::<SocketAddr>().unwrap();
-    let (username, password) = ("username", "password");
+    //let (username, password) = ("username", "password");
 
     let (resolver, dns_background) =
         AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
@@ -21,9 +21,9 @@ fn main() {
         async move {
             tokio::spawn(dns_background);
 
-            let auth = server::UserPassAuth::new(username, password);
+            //let auth = server::UserPassAuth::new(username, password);
             let connector = dns::DnsConnector::new(resolver);
-            let s = server::Server::new(auth, connector, Duration::from_secs(5));
+            let s = server::Server::new(server::NoAuth, connector, Duration::from_secs(5));
             let result = await!(s.listen(addr));
             match result {
                 Ok(()) => (),

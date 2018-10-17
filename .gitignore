@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+
+*.sublime-project
+*.sublime-workspace
