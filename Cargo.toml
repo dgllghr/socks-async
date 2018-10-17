@@ -1,8 +1,11 @@
 [package]
-name = "socks_async"
+name = "socks-async"
 version = "0.1.0"
 authors = ["dan"]
 edition = "2018"
+
+[lib]
+name = "socks_async"
 
 [dependencies]
 bytes = "0.4"
