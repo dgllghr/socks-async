@@ -24,11 +24,14 @@ where
         }
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> io::Result<Reply> {
+    pub async fn connect(
+        &self,
+        socks_server_addr: SocketAddr,
+        target_addr: Address
+    ) -> io::Result<Reply> {
         let buf = BytesMut::with_capacity(262);
-        let server = await!(TcpStream::connect(&addr))?;
-        let address = Address::Ip(addr.clone());
-        let (server, _) = await!(self.establish(server, buf, address))?;
+        let server = await!(TcpStream::connect(&socks_server_addr))?;
+        let (server, _) = await!(self.establish(server, buf, target_addr))?;
         Ok(server)
     }
 
@@ -158,7 +161,7 @@ async fn prepare_address_buf(
         AddressType::DomainName => {
             buf.resize(1, 0);
             let (server, mut buf) = await!(io::read_exact(server, buf))?;
-            buf.resize(buf[0] as usize + 1, 0);
+            buf.resize(buf[0] as usize + 3, 0);
             Ok((server, buf, 1))
         }
     }
