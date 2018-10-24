@@ -1,4 +1,3 @@
-use bytes::BytesMut;
 use tokio::io;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
@@ -45,27 +44,22 @@ impl Into<u8> for AuthMethod {
 pub struct AuthResult {
     pub authorized: bool,
     pub conn: TcpStream,
-    pub buf: BytesMut,
+    pub buf: Vec<u8>,
 }
 
 pub trait AuthServerProtocol {
     type Future: Future<Item = AuthResult, Error = std::io::Error> + Send;
 
     fn methods(&self) -> Vec<AuthMethod>;
-    fn check_auth(
-        &self,
-        client: TcpStream,
-        auth_method: &AuthMethod,
-        buf: BytesMut,
-    ) -> Self::Future;
+    fn check_auth(&self, client: TcpStream, auth_method: &AuthMethod, buf: Vec<u8>)
+        -> Self::Future;
 }
 
 pub trait AuthClientProtocol {
     type Future: Future<Item = AuthResult, Error = std::io::Error> + Send;
 
     fn methods(&self) -> Vec<AuthMethod>;
-    fn send_auth(&self, server: TcpStream, auth_method: &AuthMethod, buf: BytesMut)
-        -> Self::Future;
+    fn send_auth(&self, server: TcpStream, auth_method: &AuthMethod, buf: Vec<u8>) -> Self::Future;
 }
 
 #[derive(Clone)]
@@ -82,7 +76,7 @@ impl AuthServerProtocol for NoAuth {
         &self,
         client: TcpStream,
         _auth_method: &AuthMethod,
-        buf: BytesMut,
+        buf: Vec<u8>,
     ) -> Self::Future {
         future::ok(AuthResult {
             authorized: true,
@@ -102,8 +96,8 @@ impl AuthClientProtocol for NoAuth {
     fn send_auth(
         &self,
         server: TcpStream,
-        auth_method: &AuthMethod,
-        buf: BytesMut,
+        _auth_method: &AuthMethod,
+        buf: Vec<u8>,
     ) -> Self::Future {
         future::ok(AuthResult {
             authorized: true,
@@ -139,7 +133,7 @@ impl AuthServerProtocol for UserPassAuth {
         &self,
         client: TcpStream,
         _auth_method: &AuthMethod,
-        buf: BytesMut,
+        buf: Vec<u8>,
     ) -> Self::Future {
         let server_username = self.username.clone();
         let server_password = self.password.clone();
@@ -167,9 +161,9 @@ impl AuthClientProtocol for UserPassAuth {
 
     fn send_auth(
         &self,
-        server: TcpStream,
-        auth_method: &AuthMethod,
-        buf: BytesMut,
+        _server: TcpStream,
+        _auth_method: &AuthMethod,
+        _buf: Vec<u8>,
     ) -> Self::Future {
         unimplemented!()
     }
@@ -177,19 +171,19 @@ impl AuthClientProtocol for UserPassAuth {
 
 fn recv_username_password(
     conn: TcpStream,
-    mut buf: BytesMut,
-) -> Box<Future<Item = (TcpStream, BytesMut, String, String), Error = io::Error> + Send> {
+    mut buf: Vec<u8>,
+) -> Box<Future<Item = (TcpStream, Vec<u8>, String, String), Error = io::Error> + Send> {
     buf.resize(2, 0);
     let f = io::read_exact(conn, buf)
-        .and_then(|(conn, mut buf)| -> Box<Future<Item=(TcpStream, BytesMut), Error=io::Error> + Send> {
+        .and_then(move |(conn, mut buf)| -> Box<Future<Item=(TcpStream, Vec<u8>), Error=io::Error> + Send> {
             if buf[0] != 0x01 {
                 Box::new(Err(io::Error::new(
                     io::ErrorKind::Other,
                     "invalid version. only socks5 supported.",
                 )).into_future())
             } else {
-                let username_len = buf[1] as usize;
-                buf.resize(username_len + 1, 0);
+                let buf_size = buf[1] as usize + 1;
+                buf.resize(buf_size, 0);
                 Box::new(io::read_exact(conn, buf))
             }
         })

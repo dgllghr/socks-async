@@ -8,6 +8,5 @@ edition = "2018"
 name = "socks_async"
 
 [dependencies]
-bytes = "0.4"
 tokio = { version = "0.1", features = ["async-await-preview"] }
 trust-dns-resolver = "0.10.0-alpha.2"

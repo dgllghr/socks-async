@@ -1,10 +1,9 @@
 pub use super::auth::*;
 pub use super::common::*;
-use bytes::{BufMut, BytesMut};
 use std;
 use std::collections::HashSet;
 use std::convert::TryFrom;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
@@ -19,13 +18,12 @@ pub struct Server<A: Clone, C: Clone> {
 
 struct Greeting {
     client: TcpStream,
-    buf: BytesMut,
     auth_methods: HashSet<AuthMethod>,
 }
 
+#[derive(Debug)]
 struct Request {
     client: TcpStream,
-    buf: BytesMut,
     cmd_code: CommandCode,
     address: Address,
 }
@@ -44,15 +42,13 @@ pub trait Connector {
 pub struct DefaultConnector;
 
 pub trait ReplyMessage {
-    type Future: Future<Item = (TcpStream, BytesMut), Error = io::Error> + Send;
-
-    fn send(&self, address: &Address, client: TcpStream, buf: BytesMut) -> Self::Future;
     fn connection(self) -> Option<TcpStream>;
+    fn encode<'a>(&'a self, address: &'a Address, buf: &'a mut [u8]) -> &'a [u8];
 }
 
 pub struct RawReply {
     connection: Option<TcpStream>,
-    message: BytesMut,
+    message: Vec<u8>,
 }
 
 impl<A, R, C> Server<A, C>
@@ -89,8 +85,9 @@ where
 
     async fn client_handler(self, client: TcpStream) -> io::Result<()> {
         // TODO handshake timeout
-        let buf = BytesMut::with_capacity(257);
-        let greeting = await!(recv_greeting(client, buf))?;
+        let mut buf = Vec::with_capacity(257);
+        buf.resize(257, 0);
+        let greeting = await!(recv_greeting(client, &mut buf[..]))?;
         if greeting.auth_methods.is_empty() {
             await!(reject_greeting(greeting.client))?;
             return Err(io::Error::new(io::ErrorKind::Other, "no auth methods"));
@@ -110,10 +107,7 @@ where
             auth_method.as_ref().unwrap()
         ))?;
 
-        let auth_result = await!(
-            self.auth
-                .check_auth(client, auth_method.unwrap(), greeting.buf)
-        )?;
+        let auth_result = await!(self.auth.check_auth(client, auth_method.unwrap(), buf))?;
         if !auth_result.authorized {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -121,16 +115,22 @@ where
             ));
         }
 
-        let request = await!(recv_conn_request(auth_result.conn, auth_result.buf))?;
+        let client = auth_result.conn;
+        let mut buf = auth_result.buf;
+        buf.resize(257, 0);
+        let request = await!(recv_conn_request(client, &mut buf[..]))?;
+        let client = request.client;
         if request.cmd_code != CommandCode::Connect {
-            await!(Reply::CommandNotSupported.send(&request.address, request.client, request.buf))?;
+            let reply_buf = Reply::CommandNotSupported.encode(&request.address, &mut buf[..]);
+            await!(io::write_all(client, reply_buf))?;
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
                 "command not supported.",
             ));
         }
         let reply = await!(self.connector.connect(&request.address))?;
-        let (client, _) = await!(reply.send(&request.address, request.client, request.buf))?;
+        let reply_buf = reply.encode(&request.address, &mut buf[..]);
+        let (client, _) = await!(io::write_all(client, reply_buf))?;
         match reply.connection() {
             Some(c) => await!(copy(client, c)),
             None => Ok(()),
@@ -182,8 +182,6 @@ impl Connector for DefaultConnector {
 }
 
 impl ReplyMessage for Reply {
-    type Future = io::WriteAll<TcpStream, BytesMut>;
-
     fn connection(self) -> Option<TcpStream> {
         match self {
             Reply::Success(conn, _) => Some(conn),
@@ -192,43 +190,37 @@ impl ReplyMessage for Reply {
         }
     }
 
-    fn send(&self, address: &Address, client: TcpStream, mut buf: BytesMut) -> Self::Future {
-        buf.clear();
+    fn encode<'a>(&'a self, address: &'a Address, buf: &'a mut [u8]) -> &'a [u8] {
         let addr_type = (&address.address_type()).into();
-        buf.put_slice(&[0x05, self.code(), 0x00, addr_type]);
-        address.encode(&mut buf);
-        io::write_all(client, buf.take())
+        buf[..4].clone_from_slice(&[0x05, self.code(), 0x00, addr_type][..]);
+        let size = address.encode(&mut buf[4..]);
+        &buf[..(size + 4)]
     }
 }
 
 impl ReplyMessage for RawReply {
-    type Future = io::WriteAll<TcpStream, BytesMut>;
-
     fn connection(self) -> Option<TcpStream> {
         self.connection
     }
 
-    fn send(&self, _address: &Address, client: TcpStream, _buf: BytesMut) -> Self::Future {
-        io::write_all(client, self.message.clone())
+    fn encode(&self, _address: &Address, _buf: &mut [u8]) -> &[u8] {
+        &self.message[..]
     }
 }
 
-async fn recv_greeting(client: TcpStream, mut buf: BytesMut) -> std::io::Result<Greeting> {
-    buf.resize(2, 0);
-    let (client, mut buf) = await!(io::read_exact(client, buf))?;
+async fn recv_greeting(client: TcpStream, buf: &mut [u8]) -> std::io::Result<Greeting> {
+    let (client, _) = await!(io::read_exact(client, &mut buf[..2]))?;
     if buf[0] != 0x05 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "invalid version. only socks5 supported.",
         ));
     }
-    let num_auth_methods = buf[1];
-    buf.resize(num_auth_methods as usize, 0);
-    let (client, buf) = await!(io::read_exact(client, buf))?;
+    let num_auth_methods = buf[1] as usize;
+    let (client, buf) = await!(io::read_exact(client, &mut buf[..num_auth_methods]))?;
     let auth_methods = buf.iter().map(|b| b.into()).collect();
     Ok(Greeting {
         client,
-        buf,
         auth_methods,
     })
 }
@@ -258,9 +250,8 @@ fn select_auth_method<'a, 'b>(
     None
 }
 
-async fn recv_conn_request(client: TcpStream, mut buf: BytesMut) -> std::io::Result<Request> {
-    buf.resize(4, 0);
-    let (client, buf) = await!(io::read_exact(client, buf))?;
+async fn recv_conn_request(client: TcpStream, buf: &mut [u8]) -> std::io::Result<Request> {
+    let (client, _) = await!(io::read_exact(client, &mut buf[..4]))?;
     if buf[0] != 0x05 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -275,76 +266,12 @@ async fn recv_conn_request(client: TcpStream, mut buf: BytesMut) -> std::io::Res
         ));
     }
     let addr_type = AddressType::try_from(&buf[3])?;
-    let (client, buf, address) = await!(parse_address(client, buf, addr_type))?;
+    let (client, address) = await!(Address::decode(client, buf, &addr_type))?;
     Ok(Request {
         client,
-        buf,
         cmd_code,
         address,
     })
-}
-
-async fn parse_address(
-    client: TcpStream,
-    mut buf: BytesMut,
-    addr_type: AddressType,
-) -> io::Result<(TcpStream, BytesMut, Address)> {
-    match addr_type {
-        AddressType::IpV4 => {
-            buf.resize(6, 0);
-            let (client, buf) = await!(io::read_exact(client, buf))?;
-            let (ip_v4, buf) = parse_ip_v4(buf);
-            let addr = Address::Ip(SocketAddr::V4(ip_v4));
-            Ok((client, buf, addr))
-        }
-        AddressType::IpV6 => {
-            buf.resize(18, 0);
-            let (client, buf) = await!(io::read_exact(client, buf))?;
-            let (ip_v6, buf) = parse_ip_v6(buf);
-            let addr = Address::Ip(SocketAddr::V6(ip_v6));
-            Ok((client, buf, addr))
-        }
-        AddressType::DomainName => {
-            let (client, ds_buf) = await!(io::read_exact(client, [0]))?;
-            let domain_length = ds_buf[0] as usize;
-            buf.resize(domain_length + 2, 0);
-            let (client, buf) = await!(io::read_exact(client, buf))?;
-            let (domain_name, port, buf) = parse_domain_addr(buf, domain_length)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let addr = Address::Domain(domain_name.to_string(), port);
-            Ok((client, buf, addr))
-        }
-    }
-}
-
-fn parse_ip_v4(buf: BytesMut) -> (SocketAddrV4, BytesMut) {
-    let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-    let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
-    (SocketAddrV4::new(addr, port), buf)
-}
-
-fn parse_ip_v6(buf: BytesMut) -> (SocketAddrV6, BytesMut) {
-    let a = ((buf[0] as u16) << 8) | (buf[1] as u16);
-    let b = ((buf[2] as u16) << 8) | (buf[3] as u16);
-    let c = ((buf[4] as u16) << 8) | (buf[5] as u16);
-    let d = ((buf[6] as u16) << 8) | (buf[7] as u16);
-    let e = ((buf[8] as u16) << 8) | (buf[9] as u16);
-    let f = ((buf[10] as u16) << 8) | (buf[11] as u16);
-    let g = ((buf[12] as u16) << 8) | (buf[13] as u16);
-    let h = ((buf[14] as u16) << 8) | (buf[15] as u16);
-    let addr = Ipv6Addr::new(a, b, c, d, e, f, g, h);
-    let port = ((buf[16] as u16) << 8) | (buf[17] as u16);
-    (SocketAddrV6::new(addr, port, 0, 0), buf)
-}
-
-fn parse_domain_addr(
-    buf: BytesMut,
-    domain_length: usize,
-) -> Result<(String, u16, BytesMut), std::str::Utf8Error> {
-    let (d, p) = buf.split_at(domain_length);
-    let domain_name = std::str::from_utf8(d)?;
-    let port = ((p[0] as u16) << 8) | (p[1] as u16);
-    Ok((domain_name.to_string(), port, buf))
 }
 
 async fn copy(left: TcpStream, right: TcpStream) -> io::Result<()> {

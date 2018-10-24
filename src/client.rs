@@ -1,6 +1,5 @@
 pub use super::auth::*;
 pub use super::common::*;
-use bytes::{BufMut, BytesMut};
 use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -27,23 +26,24 @@ where
     pub async fn connect(
         &self,
         socks_server_addr: SocketAddr,
-        target_addr: Address
+        target_addr: Address,
     ) -> io::Result<Reply> {
-        let buf = BytesMut::with_capacity(262);
+        let mut buf = Vec::with_capacity(262);
+        buf.resize(262, 0);
         let server = await!(TcpStream::connect(&socks_server_addr))?;
-        let (server, _) = await!(self.establish(server, buf, target_addr))?;
-        Ok(server)
+        let reply = await!(self.establish(server, buf, target_addr))?;
+        Ok(reply)
     }
 
-    async fn establish(
-        &self,
+    async fn establish<'a>(
+        &'a self,
         server: TcpStream,
-        buf: BytesMut,
+        mut buf: Vec<u8>,
         address: Address,
-    ) -> io::Result<(Reply, BytesMut)> {
+    ) -> io::Result<Reply> {
         let auth_methods = &self.auth.methods();
-        let (server, buf) = await!(send_greeting(server, buf, auth_methods))?;
-        let (server, buf, auth_method) = await!(recv_greeting_response(server, buf))?;
+        let server = await!(send_greeting(server, &mut buf[..], auth_methods))?;
+        let (server, auth_method) = await!(recv_greeting_response(server, &mut buf[..]))?;
         if !auth_methods.contains(&auth_method) {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
@@ -59,33 +59,34 @@ where
                 "authorization failed",
             ));
         }
+        let mut buf = auth_result.buf;
 
         // request/reply
-        let (server, buf) = await!(send_request(auth_result.conn, auth_result.buf, &address))?;
-        await!(recv_reply(server, buf))
+        let server = await!(send_request(auth_result.conn, &mut buf[..], &address))?;
+        await!(recv_reply(server, &mut buf[..]))
     }
 }
 
-async fn send_greeting(
+async fn send_greeting<'a>(
     server: TcpStream,
-    mut buf: BytesMut,
-    auth_methods: &[AuthMethod],
-) -> io::Result<(TcpStream, BytesMut)> {
-    buf.clear();
+    buf: &'a mut [u8],
+    auth_methods: &'a [AuthMethod],
+) -> io::Result<TcpStream> {
     let num_auth_methods = auth_methods.len();
-    buf.put_slice(&[0x05, num_auth_methods as u8]);
-    for m in auth_methods {
-        buf.put_u8(m.into());
+    buf[..2].copy_from_slice(&[0x05, num_auth_methods as u8][..]);
+    for (i, m) in auth_methods.iter().enumerate() {
+        buf[i + 2] = m.into();
     }
-    await!(io::write_all(server, buf))
+    let buf_size = auth_methods.len() + 2;
+    let (server, _) = await!(io::write_all(server, &buf[..buf_size]))?;
+    Ok(server)
 }
 
 async fn recv_greeting_response(
     server: TcpStream,
-    mut buf: BytesMut,
-) -> io::Result<(TcpStream, BytesMut, AuthMethod)> {
-    buf.resize(2, 0);
-    let (server, buf) = await!(io::read_exact(server, buf))?;
+    buf: &mut [u8],
+) -> io::Result<(TcpStream, AuthMethod)> {
+    let (server, _) = await!(io::read_exact(server, &mut buf[..2]))?;
     if buf[0] != 0x05 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -99,25 +100,25 @@ async fn recv_greeting_response(
         ));
     }
     let auth_method = buf[1].into();
-    Ok((server, buf, auth_method))
+    Ok((server, auth_method))
 }
 
-async fn send_request(
+async fn send_request<'a>(
     server: TcpStream,
-    mut buf: BytesMut,
-    addr: &Address,
-) -> io::Result<(TcpStream, BytesMut)> {
-    buf.clear();
+    buf: &'a mut [u8],
+    addr: &'a Address,
+) -> io::Result<TcpStream> {
     let cmd = CommandCode::Connect.into();
     let addr_type = addr.address_type().into();
-    buf.put_slice(&[0x05, cmd, 0x00, addr_type]);
-    addr.encode(&mut buf);
-    await!(io::write_all(server, buf))
+    buf[..4].copy_from_slice(&[0x05, cmd, 0x00, addr_type][..]);
+    let addr_length = addr.encode(&mut buf[4..]);
+    let buf_size = addr_length + 4;
+    let (server, _) = await!(io::write_all(server, &buf[..buf_size]))?;
+    Ok(server)
 }
 
-async fn recv_reply(server: TcpStream, mut buf: BytesMut) -> io::Result<(Reply, BytesMut)> {
-    buf.resize(4, 0);
-    let (server, buf) = await!(io::read_exact(server, buf))?;
+async fn recv_reply(server: TcpStream, buf: &mut [u8]) -> io::Result<Reply> {
+    let (server, _) = await!(io::read_exact(server, &mut buf[..4]))?;
     if buf[0] != 0x05 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -133,36 +134,33 @@ async fn recv_reply(server: TcpStream, mut buf: BytesMut) -> io::Result<(Reply, 
     // TODO convert to appropriate response
     if buf[1] != 0x00 {
         let reply = Reply::from_err_code(buf[1]);
-        return Ok((reply, buf));
+        return Ok(reply);
     }
 
     let addr_type = AddressType::try_from(&buf[3])?;
-    let (server, mut buf, start) = await!(prepare_address_buf(server, buf, &addr_type))?;
-    let (server, _) = await!(io::read_exact(server, &mut buf[start..]))?;
-    let (addr, buf) = Address::decode(&addr_type, buf);
-
-    Ok((Reply::Success(server, addr), buf))
+    let (server, addr) = await!(Address::decode(server, &mut buf[..], &addr_type))?;
+    Ok(Reply::Success(server, addr))
 }
 
-async fn prepare_address_buf(
-    server: TcpStream,
-    mut buf: BytesMut,
-    addr_type: &AddressType,
-) -> io::Result<(TcpStream, BytesMut, usize)> {
-    match addr_type {
-        AddressType::IpV4 => {
-            buf.resize(6, 0);
-            Ok((server, buf, 0))
-        }
-        AddressType::IpV6 => {
-            buf.resize(18, 0);
-            Ok((server, buf, 0))
-        }
-        AddressType::DomainName => {
-            buf.resize(1, 0);
-            let (server, mut buf) = await!(io::read_exact(server, buf))?;
-            buf.resize(buf[0] as usize + 3, 0);
-            Ok((server, buf, 1))
-        }
-    }
-}
+// async fn prepare_address_buf(
+//     server: TcpStream,
+//     mut buf: BytesMut,
+//     addr_type: &AddressType,
+// ) -> io::Result<(TcpStream, BytesMut, usize)> {
+//     match addr_type {
+//         AddressType::IpV4 => {
+//             buf.resize(6, 0);
+//             Ok((server, buf, 0))
+//         }
+//         AddressType::IpV6 => {
+//             buf.resize(18, 0);
+//             Ok((server, buf, 0))
+//         }
+//         AddressType::DomainName => {
+//             buf.resize(1, 0);
+//             let (server, mut buf) = await!(io::read_exact(server, buf))?;
+//             buf.resize(buf[0] as usize + 3, 0);
+//             Ok((server, buf, 1))
+//         }
+//     }
+// }

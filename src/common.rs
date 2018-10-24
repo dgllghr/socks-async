@@ -1,8 +1,8 @@
-use bytes::BufMut;
 use std::convert::TryFrom;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use tokio::io;
 use tokio::net::TcpStream;
+use tokio::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CommandCode {
@@ -82,7 +82,7 @@ impl Into<u8> for AddressType {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Address {
     Ip(SocketAddr),
     Domain(String, u16),
@@ -97,85 +97,90 @@ impl Address {
         }
     }
 
-    pub fn encode<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-    {
+    pub fn encode(&self, buf: &mut [u8]) -> usize {
         match self {
             Address::Ip(SocketAddr::V4(ip_v4)) => {
-                buf.put_slice(&ip_v4.ip().octets());
-                buf.put_u16_be(ip_v4.port());
+                buf[..4].clone_from_slice(&ip_v4.ip().octets()[..]);
+                let port = ip_v4.port();
+                buf[4] = ((port >> 8) & 0xFF) as u8;
+                buf[5] = (port & 0xFF) as u8;
+                6
             }
             Address::Ip(SocketAddr::V6(ip_v6)) => {
-                buf.put_slice(&ip_v6.ip().octets());
-                buf.put_u16_be(ip_v6.port());
+                buf[..16].clone_from_slice(&ip_v6.ip().octets()[..]);
+                let port = ip_v6.port();
+                buf[17] = ((port >> 8) & 0xFF) as u8;
+                buf[18] = (port & 0xFF) as u8;
+                18
             }
             Address::Domain(domain_name, port) => {
-                buf.put_u8(domain_name.len() as u8);
-                let len = std::cmp::min(domain_name.len(), 255);
-                buf.put_slice(&domain_name[..len].as_bytes());
-                buf.put_u16_be(*port);
+                let len = std::cmp::min(domain_name.len(), 255) as usize;
+                buf[0] = len as u8;
+                buf[1..(len + 1)].copy_from_slice(&domain_name[..len].as_bytes()[..]);
+                buf[len + 1] = ((port >> 8) & (0xFF as u16)) as u8;
+                buf[len + 2] = (port & 0xFF) as u8;
+                len + 3
             }
         }
     }
 
-    pub fn decode<B>(address_type: &AddressType, buf: B) -> (Address, B)
+    pub async fn decode<'a, R>(
+        from: R,
+        buf: &'a mut [u8],
+        addr_type: &'a AddressType,
+    ) -> io::Result<(R, Address)>
     where
-        B: AsRef<[u8]>,
+        R: 'a + AsyncRead,
     {
-        match address_type {
-            AddressType::IpV4 => parse_ip_v4(buf),
-            AddressType::IpV6 => parse_ip_v6(buf),
-            AddressType::DomainName => parse_domain_addr(buf),
+        match addr_type {
+            AddressType::IpV4 => {
+                let (from, _) = await!(io::read_exact(from, &mut buf[..6]))?;
+                let addr = parse_ip_v4(buf);
+                Ok((from, addr))
+            }
+            AddressType::IpV6 => {
+                let (from, _) = await!(io::read_exact(from, &mut buf[..18]))?;
+                let addr = parse_ip_v6(buf);
+                Ok((from, addr))
+            }
+            AddressType::DomainName => {
+                let (from, _) = await!(io::read_exact(from, &mut buf[..1]))?;
+                let buf_size = buf[0] as usize + 2;
+                let (from, _) = await!(io::read_exact(from, &mut buf[1..(buf_size + 1)]))?;
+                let addr = parse_domain_addr(buf);
+                Ok((from, addr))
+            }
         }
     }
 }
 
-fn parse_ip_v4<B>(buf: B) -> (Address, B)
-where
-    B: AsRef<[u8]>,
-{
-    let ba = buf.as_ref();
-    let addr = Ipv4Addr::new(ba[0], ba[1], ba[2], ba[3]);
-    let port = ((ba[4] as u16) << 8) | (ba[5] as u16);
-    (
-        Address::Ip(SocketAddr::V4(SocketAddrV4::new(addr, port))),
-        buf,
-    )
+fn parse_ip_v4(buf: &[u8]) -> Address {
+    let addr = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+    let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
+    Address::Ip(SocketAddr::V4(SocketAddrV4::new(addr, port)))
 }
 
-fn parse_ip_v6<B>(buf: B) -> (Address, B)
-where
-    B: AsRef<[u8]>,
-{
-    let ba = buf.as_ref();
-    let a = ((ba[0] as u16) << 8) | (ba[1] as u16);
-    let b = ((ba[2] as u16) << 8) | (ba[3] as u16);
-    let c = ((ba[4] as u16) << 8) | (ba[5] as u16);
-    let d = ((ba[6] as u16) << 8) | (ba[7] as u16);
-    let e = ((ba[8] as u16) << 8) | (ba[9] as u16);
-    let f = ((ba[10] as u16) << 8) | (ba[11] as u16);
-    let g = ((ba[12] as u16) << 8) | (ba[13] as u16);
-    let h = ((ba[14] as u16) << 8) | (ba[15] as u16);
+fn parse_ip_v6(buf: &[u8]) -> Address {
+    let a = ((buf[0] as u16) << 8) | (buf[1] as u16);
+    let b = ((buf[2] as u16) << 8) | (buf[3] as u16);
+    let c = ((buf[4] as u16) << 8) | (buf[5] as u16);
+    let d = ((buf[6] as u16) << 8) | (buf[7] as u16);
+    let e = ((buf[8] as u16) << 8) | (buf[9] as u16);
+    let f = ((buf[10] as u16) << 8) | (buf[11] as u16);
+    let g = ((buf[12] as u16) << 8) | (buf[13] as u16);
+    let h = ((buf[14] as u16) << 8) | (buf[15] as u16);
     let addr = Ipv6Addr::new(a, b, c, d, e, f, g, h);
-    let port = ((ba[16] as u16) << 8) | (ba[17] as u16);
-    (
-        Address::Ip(SocketAddr::V6(SocketAddrV6::new(addr, port, 0, 0))),
-        buf,
-    )
+    let port = ((buf[16] as u16) << 8) | (buf[17] as u16);
+    Address::Ip(SocketAddr::V6(SocketAddrV6::new(addr, port, 0, 0)))
 }
 
-fn parse_domain_addr<B>(buf: B) -> (Address, B)
-where
-    B: AsRef<[u8]>,
-{
-    let ba = buf.as_ref();
-    let domain_length = ba[0] as usize;
+fn parse_domain_addr(buf: &[u8]) -> Address {
+    let domain_length = buf[0] as usize;
     let split_point = domain_length + 1;
-    let domain_name = String::from_utf8_lossy(&ba[1..split_point]);
-    let port = ((ba[split_point] as u16) << 8) | (ba[split_point + 1] as u16);
+    let domain_name = String::from_utf8_lossy(&buf[1..split_point]);
+    let port = ((buf[split_point] as u16) << 8) | (buf[split_point + 1] as u16);
     let addr = Address::Domain(domain_name.to_string(), port);
-    (addr, buf)
+    addr
 }
 
 pub enum Reply {
