@@ -15,7 +15,7 @@ fn main() {
 
     tokio::run_async(
         async move {
-            let auth = UserPassAuth::new(username, password);
+            let auth = UserPassAuth::new(username, password).unwrap();
             let s = Client::new(auth, Duration::from_secs(5));
             let reply = await!(s.connect(server_addr, target_addr));
             match reply {

@@ -21,7 +21,7 @@ fn main() {
         async move {
             tokio::spawn(dns_background);
 
-            let auth = server::UserPassAuth::new(username, password);
+            let auth = server::UserPassAuth::new(username, password).unwrap();
             let connector = dns::DnsConnector::new(resolver);
             let s = server::Server::new(auth, connector, Duration::from_secs(5));
             let result = await!(s.listen(addr));

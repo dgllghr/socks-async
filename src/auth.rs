@@ -1,3 +1,4 @@
+use std::fmt;
 use tokio::io;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
@@ -107,19 +108,32 @@ impl AuthClientProtocol for NoAuth {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct InvalidCredentialsError;
+
+impl fmt::Display for InvalidCredentialsError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt("invalid credentials. must be <= 255 bytes", f)
+    }
+}
+
 #[derive(Clone)]
 pub struct UserPassAuth {
-    pub username: String,
-    pub password: String,
+    pub username: Vec<u8>,
+    pub password: Vec<u8>,
 }
 
 impl UserPassAuth {
-    pub fn new(username: &str, password: &str) -> UserPassAuth {
-        // TODO check that both username and password are <= 255 bytes
-        UserPassAuth {
-            username: username.to_string(),
-            password: password.to_string(),
+    pub fn new(username: &str, password: &str) -> Result<UserPassAuth, InvalidCredentialsError> {
+        let u_bytes = username.as_bytes();
+        let p_bytes = password.as_bytes();
+        if p_bytes.len() > 255 || p_bytes.len() > 255 {
+            return Err(InvalidCredentialsError);
         }
+        Ok(UserPassAuth {
+            username: u_bytes.to_vec(),
+            password: p_bytes.to_vec(),
+        })
     }
 }
 
@@ -171,9 +185,9 @@ impl AuthClientProtocol for UserPassAuth {
         buf.resize(buf_size, 0);
         buf[0] = 0x01;
         buf[1] = self.username.len() as u8;
-        buf[2..(username_size + 2)].copy_from_slice(self.username.as_bytes());
+        buf[2..(username_size + 2)].copy_from_slice(&self.username[..]);
         buf[username_size + 2] = self.password.len() as u8;
-        buf[(username_size + 3)..].copy_from_slice(self.password.as_bytes());
+        buf[(username_size + 3)..].copy_from_slice(&self.password[..]);
         let f = io::write_all(server, buf).and_then(move |(server, buf)| {
             io::read_exact(server, [0x0; 2]).and_then(move |(server, resp)| {
                 if resp[0] != 0x01 {
@@ -204,7 +218,7 @@ impl AuthClientProtocol for UserPassAuth {
 fn recv_username_password(
     conn: TcpStream,
     mut buf: Vec<u8>,
-) -> Box<Future<Item = (TcpStream, Vec<u8>, String, String), Error = io::Error> + Send> {
+) -> Box<Future<Item = (TcpStream, Vec<u8>, Vec<u8>, Vec<u8>), Error = io::Error> + Send> {
     buf.resize(2, 0);
     let f = io::read_exact(conn, buf)
         .and_then(move |(conn, mut buf)| -> Box<Future<Item=(TcpStream, Vec<u8>), Error=io::Error> + Send> {
@@ -221,12 +235,12 @@ fn recv_username_password(
         })
         .and_then(|(conn, mut buf)| {
             let username_len = buf.len() - 1;
-            let username = String::from_utf8_lossy(&buf[..username_len]).into_owned();
+            let username = (&buf[..username_len]).to_vec();
             let password_len = buf[username_len] as usize;
             buf.resize(password_len, 0);
             io::read_exact(conn, buf)
                 .map(move |(conn, buf)| {
-                    let password = String::from_utf8_lossy(&buf[..]).into_owned();
+                    let password = (&buf[..]).to_vec();
                     (conn, buf, username, password)
                 })
         });
