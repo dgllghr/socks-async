@@ -115,6 +115,7 @@ pub struct UserPassAuth {
 
 impl UserPassAuth {
     pub fn new(username: &str, password: &str) -> UserPassAuth {
+        // TODO check that both username and password are <= 255 bytes
         UserPassAuth {
             username: username.to_string(),
             password: password.to_string(),
@@ -161,11 +162,42 @@ impl AuthClientProtocol for UserPassAuth {
 
     fn send_auth(
         &self,
-        _server: TcpStream,
+        server: TcpStream,
         _auth_method: &AuthMethod,
-        _buf: Vec<u8>,
+        mut buf: Vec<u8>,
     ) -> Self::Future {
-        unimplemented!()
+        let username_size = self.username.len();
+        let buf_size = username_size + self.password.len() + 3;
+        buf.resize(buf_size, 0);
+        buf[0] = 0x01;
+        buf[1] = self.username.len() as u8;
+        buf[2..(username_size + 2)].copy_from_slice(self.username.as_bytes());
+        buf[username_size + 2] = self.password.len() as u8;
+        buf[(username_size + 3)..].copy_from_slice(self.password.as_bytes());
+        let f = io::write_all(server, buf).and_then(move |(server, buf)| {
+            io::read_exact(server, [0x0; 2]).and_then(move |(server, resp)| {
+                if resp[0] != 0x01 {
+                    Box::new(
+                        Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "invalid version. only socks5 supported.",
+                        ))
+                        .into_future(),
+                    )
+                } else {
+                    let authorized = resp[1] == 0x00;
+                    Box::new(
+                        Ok(AuthResult {
+                            conn: server,
+                            buf,
+                            authorized,
+                        })
+                        .into_future(),
+                    )
+                }
+            })
+        });
+        Box::new(f)
     }
 }
 

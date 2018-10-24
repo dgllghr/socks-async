@@ -28,8 +28,8 @@ where
         socks_server_addr: SocketAddr,
         target_addr: Address,
     ) -> io::Result<Reply> {
-        let mut buf = Vec::with_capacity(262);
-        buf.resize(262, 0);
+        let mut buf = Vec::with_capacity(520);
+        buf.resize(520, 0);
         let server = await!(TcpStream::connect(&socks_server_addr))?;
         let reply = await!(self.establish(server, buf, target_addr))?;
         Ok(reply)
@@ -60,6 +60,7 @@ where
             ));
         }
         let mut buf = auth_result.buf;
+        buf.resize(520, 0);
 
         // request/reply
         let server = await!(send_request(auth_result.conn, &mut buf[..], &address))?;
@@ -141,26 +142,3 @@ async fn recv_reply(server: TcpStream, buf: &mut [u8]) -> io::Result<Reply> {
     let (server, addr) = await!(Address::decode(server, &mut buf[..], &addr_type))?;
     Ok(Reply::Success(server, addr))
 }
-
-// async fn prepare_address_buf(
-//     server: TcpStream,
-//     mut buf: BytesMut,
-//     addr_type: &AddressType,
-// ) -> io::Result<(TcpStream, BytesMut, usize)> {
-//     match addr_type {
-//         AddressType::IpV4 => {
-//             buf.resize(6, 0);
-//             Ok((server, buf, 0))
-//         }
-//         AddressType::IpV6 => {
-//             buf.resize(18, 0);
-//             Ok((server, buf, 0))
-//         }
-//         AddressType::DomainName => {
-//             buf.resize(1, 0);
-//             let (server, mut buf) = await!(io::read_exact(server, buf))?;
-//             buf.resize(buf[0] as usize + 3, 0);
-//             Ok((server, buf, 1))
-//         }
-//     }
-// }
